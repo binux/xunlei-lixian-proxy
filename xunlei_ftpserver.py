@@ -10,7 +10,7 @@ import time
 import tornado.httpclient
 from libs.xunlei_api import LiXianAPI
 from libs.ftpserver import FTPConnection, authed
-from tornado_httpproxyclient import HTTPProxyClient
+from libs.tornado_httpproxyclient import HTTPProxyClient
 
 xunlei_cache = {}
 
@@ -45,6 +45,11 @@ class XunleiFTPConnection(FTPConnection):
 
     @authed
     def _cmd_LIST(self, line):
+        line = line.strip()
+        if line.startswith("-"):
+            line = line.split()[-1]
+            if line.startswith("-"):
+                line = ""
         if line:
             path = os.path.normpath(os.path.join(self._current_path, line))
         else:
@@ -134,11 +139,12 @@ class XunleiFTPConnection(FTPConnection):
         request.on_headers_callback = on_header_callback
         request.raw_streaming_callback = raw_streaming_callback
         def on_finished(data):
-            self.datastream.close()
+            if self.datastream:
+                self.datastream.close()
             self.respond('226 Transfer complete.')
         HTTPProxyClient().fetch(request, on_finished)
 
-if __name__ == "__main__":
+def run(port=2221, bind="0.0.0.0"):
     from libs.ftpserver import FTPServer
     from tornado.ioloop import IOLoop
     from tornado import autoreload
@@ -148,5 +154,10 @@ if __name__ == "__main__":
     import logging;logging.getLogger().setLevel(logging.DEBUG)
         
     server = FTPServer(connect_cls=XunleiFTPConnection, debug=True)
-    server.listen(2221)
+    server.listen(port, bind)
+    print 'listening on %s:%s' % (bind, port)
     IOLoop.instance().start()
+
+
+if __name__ == "__main__":
+    run()

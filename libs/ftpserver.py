@@ -131,7 +131,7 @@ class FTPConnection(object):
         cmd = line.split(' ')[0].upper()
         arg = line[len(cmd)+1:]
         try:
-            func = getattr(self, "_cmd_%s" % cmd)
+            func = getattr(self, "_cmd_%s" % cmd, None)
             if not func:
                 self.respond('500 Command "%s" not understood.' % cmd)
             else:
