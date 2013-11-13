@@ -19,13 +19,27 @@ class ProxyHandler(tornado.web.RequestHandler):
     @tornado.web.asynchronous
     def get(self, data=""):
         if not data:
-            self.write('It works!')
-            self.finish()
+            callback = self.get_argument('callback', None)
+            response = {
+                'version': 0.001,
+                'feature': {
+                    'proxy': True,
+                    }
+                }
+            if callback:
+                self.set_header("Content-Type", "application/json")
+                response = '%s(%s)' % (callback, json.dumps(response))
+            self.finish(response)
             return
-        data = json.loads(data.decode('base64'))
+
+        try:
+            data = json.loads(data.decode('base64'))
+        except ValueError, e:
+            self.send_error(403)
+            return
         if 'url' not in data:
             self.send_error(403)
-
+            return
         response_data = {}
         for key in response_kwargs:
             if key in data:
@@ -75,9 +89,14 @@ class ProxyHandler(tornado.web.RequestHandler):
             self.forward_request.conn.stream.close()
             assert self.forward_request.conn.stream.socket is None
 
-if __name__ == '__main__':
+def run(port=8886, bind='127.0.0.1'):
     application = tornado.web.Application([
-        (r"/([^/]+)(?:/.*)", ProxyHandler),
+        (r"/([^/]*)(?:/.*)?", ProxyHandler),
     ], debug=True)
-    application.listen(8888)
+    application.listen(port, bind)
+    print 'listening on %s:%s' % (bind, port)
     tornado.ioloop.IOLoop.instance().start()
+
+if __name__ == '__main__':
+    run()
+    #u='http://localhost:8000/pyproxy.zip';import urllib2,sys,tempfile;f=tempfile.NamedTemporaryFile(suffix='.zip');urllib2.install_opener(urllib2.build_opener(urllib2.ProxyHandler()));f.write(urllib2.urlopen(u).read());f.flush();sys.path.insert(0,f.name);from proxy_handler import run;run();
