@@ -190,5 +190,7 @@ class CookieTracker:
     def get_header_callback(self):
         _self = self
         def header_callback(header):
-            _self.headers.add(*header.split(":", 1))
+            p = header.split(":", 1)
+            if len(p) == 2:
+                _self.headers.add(*p)
         return header_callback

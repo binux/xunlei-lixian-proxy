@@ -69,9 +69,9 @@ class HTTPConnection(_HTTPConnection):
             self._on_body(b"")
             return
 
-        if self.request.on_headers_callback:
+        if getattr(self.request, "on_headers_callback"):
             self.io_loop.add_callback(self.request.on_headers_callback, self.code, self.headers)
-        if self.request.raw_streaming_callback:
+        if getattr(self.request, "raw_streaming_callback"):
             self.stream.read_until_close(self._on_body, self.request.raw_streaming_callback)
         else:
             if (self.request.use_gzip and

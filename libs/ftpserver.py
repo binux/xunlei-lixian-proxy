@@ -15,12 +15,14 @@ from tornado.iostream import IOStream
 from tornado import stack_context
 
 class FTPServer(TCPServer):
-    def __init__(self, io_loop=None, ssl_options=None, debug=False, **kwargs):
+    def __init__(self, io_loop=None, ssl_options=None, debug=False,
+            connect_cls=None, **kwargs):
+        self.connect_cls = connect_cls or FTPConnection
         TCPServer.__init__(self, io_loop=io_loop, ssl_options=ssl_options,
                            **kwargs)
 
     def handle_stream(self, stream, address):
-        FTPConnection(stream, address)
+        self.connect_cls(stream, address)
 
 class PassiveServer(TCPServer):
     def __init__(self, callback, io_loop=None, ssl_options=None, **kwargs):
@@ -39,7 +41,7 @@ def authed(func):
             self.respond("530 Log in with USER and PASS first.")
             return
         return func(self, *args, **kwargs)
-    return wrap
+    return wrapper
 
 class FTPConnection(object):
     banner = "Welcome!"
@@ -107,9 +109,11 @@ class FTPConnection(object):
         self.stream.read_until("\r\n", self._cmd_callback)
 
     def _on_connection_close(self):
-        pass
+        self.close()
 
     def close(self):
+        access_log.info("%s:%s disconnected." % self.address)
+        self.on_close()
         if self.passive_server:
             self.passive_server.stop()
             self.passive_server = None
@@ -127,9 +131,11 @@ class FTPConnection(object):
         cmd = line.split(' ')[0].upper()
         arg = line[len(cmd)+1:]
         try:
-            getattr(self, "_cmd_%s" % cmd)(arg)
-        except AttributeError:
-            self.respond('500 Command "%s" not understood.' % cmd)
+            func = getattr(self, "_cmd_%s" % cmd)
+            if not func:
+                self.respond('500 Command "%s" not understood.' % cmd)
+            else:
+                func(arg)
         except UnicodeEncodeError:
             self.respond("501 can't decode path")
         except Exception, e:
@@ -181,7 +187,7 @@ class FTPConnection(object):
         self.respond('257 "%s"' % self._current_path)
 
     def _cmd_CWD(self, line):
-        self._current_path = os.path.join(self._current_path, line)
+        self._current_path = os.path.normpath(os.path.join(self._current_path, line))
         self.respond(250)
 
     def _cmd_PORT(self, line):

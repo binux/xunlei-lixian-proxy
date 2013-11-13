@@ -19,7 +19,6 @@ from urllib import urlencode
 from urlparse import urlparse, urlunparse
 from random import random, sample
 from tornado import httpclient
-from tornado.options import options
 from libs.jsfunctionParser import parser_js_function_call
 
 def hex_md5(string):
@@ -316,12 +315,6 @@ class LiXianAPI:
             self.offline_id = None
             if not response:
                 return
-            for each in response:
-                if each.get("name") == options.offline:
-                    self.offline_id = each.get("id")
-                    break
-            if not self.offline_id:
-                self.menu_add(options.offline, menu_add_callback)
 
         def menu_add_callback(response):
             if response:
@@ -418,6 +411,7 @@ class LiXianAPI:
                         size=int(r["ysfilesize"]),
                         format=r["openformat"],
                         expired=r["left_live_time"],
+                        dt_committed=r["dt_committed"],
                       )
                 result.append(tmp)
             return result
@@ -527,7 +521,7 @@ class LiXianAPI:
                         cid=r['cid'],
                         url=r['url'],
                         taskname=r['title'],
-                        task_type=1,
+                        task_type="normal",
                         status=self.d_status.get(int(r['download_status'])),
                         process=r['percent'],
                         lixian_url=r['downurl'],
@@ -571,7 +565,7 @@ class LiXianAPI:
                             cid=r['cid'],
                             url=r['url'],
                             taskname=r['title'],
-                            task_type=1,
+                            task_type="normal",
                             lixian_url=r['downurl'],
                             size=int(r['filesize']),
                             title=r['title'],

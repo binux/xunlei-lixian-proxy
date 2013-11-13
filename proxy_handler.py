@@ -9,12 +9,11 @@ import json
 import tornado
 import tornado.web
 import tornado.httpclient
-from tornado_httpproxyclient import HTTPProxyClient
+from libs.tornado_httpproxyclient import HTTPProxyClient
 
 response_kwargs = ('overwrite_headers', 'del_headers', )
 forward_headers = ('Range', 'User-Agent', )
 
-tornado.httpclient.AsyncHTTPClient.configure(HTTPProxyClient)
 class ProxyHandler(tornado.web.RequestHandler):
     @tornado.web.asynchronous
     def get(self, data=""):
@@ -72,7 +71,7 @@ class ProxyHandler(tornado.web.RequestHandler):
         request.on_headers_callback = on_header_callback
         request.raw_streaming_callback = raw_streaming_callback
 
-        tornado.httpclient.AsyncHTTPClient().fetch(request, self.on_finished)
+        HTTPProxyClient().fetch(request, self.on_finished)
         #print 'here'
 
     def on_finished(self, response):
