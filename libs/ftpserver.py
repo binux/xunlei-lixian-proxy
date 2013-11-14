@@ -11,6 +11,7 @@ import functools
 from tornado.log import access_log, gen_log
 from tornado.platform.auto import set_close_exec
 from tornado.tcpserver import TCPServer
+from tornado.ioloop import IOLoop
 from tornado.iostream import IOStream
 from tornado import stack_context
 
@@ -29,10 +30,10 @@ class PassiveServer(TCPServer):
         self.callback = stack_context.wrap(callback)
         TCPServer.__init__(self, io_loop=io_loop, ssl_options=ssl_options,
                            **kwargs)
-        self.listen(0)
 
     def handle_stream(self, stream, address):
-        self.callback(stream, address)
+        access_log.info("new DataStream: %s:%s" % address)
+        self.callback(stream, address, self.io_loop)
 
 def authed(func):
     @functools.wraps(func)
@@ -50,7 +51,8 @@ class FTPConnection(object):
             451: "Sorry.",
             }
 
-    def __init__(self, stream, address):
+    def __init__(self, stream, address, io_loop = None):
+        self.io_loop = io_loop or IOLoop.instance()
         self.stream = stream
         self.address = address
 
@@ -59,6 +61,7 @@ class FTPConnection(object):
         self.rest = None
         self.passive_server = None
         self.datastream = None
+        self.reading = False
 
         self.data_channel = None
 
@@ -106,7 +109,7 @@ class FTPConnection(object):
 
         self._cmd_callback = stack_context.wrap(self._on_cmd)
         self.stream.set_close_callback(self._on_connection_close)
-        self.stream.read_until("\r\n", self._cmd_callback)
+        self.wait_cmd()
 
     def _on_connection_close(self):
         self.close()
@@ -122,27 +125,36 @@ class FTPConnection(object):
             self.datastream = None
 
     def _on_cmd(self, line):
+        self.reading = False
         try:
             line = self._decode(line)[:-2]
             gen_log.debug(line)
         except UnicodeDecodeError:
             return self.respond("501 Can't decode command.")
 
-        cmd = line.split(' ')[0].upper()
-        arg = line[len(cmd)+1:]
+        if line[-4:] in ('ABOR', 'STAT', 'QUIT'):
+            cmd = line[-4:]
+            arg = ""
+        else:
+            cmd = line.split(' ')[0].upper()
+            arg = line[len(cmd)+1:]
         try:
             func = getattr(self, "_cmd_%s" % cmd, None)
             if not func:
                 self.respond('500 Command "%s" not understood.' % cmd)
             else:
-                func(arg)
+                if func(arg) != "wait" and not self.reading:
+                    self.wait_cmd()
         except UnicodeEncodeError:
             self.respond("501 can't decode path")
         except Exception, e:
             self.respond("501 %s" % e)
             gen_log.exception(e)
 
-        self.stream.read_until("\r\n", self._cmd_callback)
+    def wait_cmd(self):
+        if not self.reading:
+            self.reading = True
+            self.stream.read_until("\r\n", self._cmd_callback)
 
     def _cmd_SYST(self, line):
         self.respond("215 UNIX Type: L8")
@@ -226,6 +238,7 @@ class FTPConnection(object):
         self.passive_server.add_socket(servsock)
         
         port = servsock.getsockname()[1]
+        self.passive_server.ip, self.passive_server.port = ip, port
         return ip, port
 
     def _cmd_PASV(self, line):
@@ -246,10 +259,19 @@ class FTPConnection(object):
         ip, port = self._new_pasv_socket(int(af))
         self.respond("229 Entering extended passive mode (|||%d|)." % port)
 
+    def on_datastream_ready(self, callback, *args, **kwargs):
+        if self.datastream:
+            callback(*args, **kwargs)
+        else:
+            self._on_datastream_callback = (callback, args, kwargs)
+
     def _on_datastream(self, stream, address):
-        self._datastream = None
         self.datastream = stream
         self.datastream.set_close_callback(stack_context.wrap(self._on_datastream_close))
+        if self._on_datastream_callback:
+            callback, args, kwargs = self._on_datastream_callback
+            self._on_datastream_callback = None
+            self.io_loop.add_callback(callback, *args, **kwargs)
 
     def _on_datastream_close(self):
         if self.datastream:

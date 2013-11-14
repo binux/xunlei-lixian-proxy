@@ -45,19 +45,27 @@ class XunleiFTPConnection(FTPConnection):
 
     @authed
     def _cmd_LIST(self, line):
-        line = line.strip()
-        if line.startswith("-"):
-            line = line.split()[-1]
-            if line.startswith("-"):
+        line = line.split()
+        if not line:
+            line = ""
+        elif len(line) == 1:
+            if line[0].startswith("-"):
                 line = ""
+            else:
+                line = line[0]
+        else:
+            line = line[-1]
+
         if line:
             path = os.path.normpath(os.path.join(self._current_path, line))
         else:
             path = self._current_path
         if path == "/":
             self.list_root(path)
+            return "wait"
         elif path in self.info_dict:
             self.list_task(path, self.info_dict[path])
+            return "wait"
         else:
             self.respond("550 No such dir.")
 
@@ -66,7 +74,6 @@ class XunleiFTPConnection(FTPConnection):
             if not self.datastream:
                 self.respond(500)
                 return
-            self.respond("150 Here comes the directory listing.")
             result = []
             for each in data:
                 if each['status'] != 'complete':
@@ -80,6 +87,8 @@ class XunleiFTPConnection(FTPConnection):
         def on_complete():
             self.datastream.close()
             self.respond("226 Directory send OK.")
+            self.do_next()
+        self.respond("150 Here comes the directory listing.")
         self.current_user.get_task_list(100, callback=on_list)
 
     def list_task(self, path, info):
@@ -87,7 +96,6 @@ class XunleiFTPConnection(FTPConnection):
             if not self.datastream:
                 self.respond(500)
                 return
-            self.respond("150 Here comes the directory listing.")
             create_time = info['dt_committed']
             result = []
             for each in data:
@@ -102,6 +110,8 @@ class XunleiFTPConnection(FTPConnection):
         def on_complete():
             self.datastream.close()
             self.respond("226 Directory send OK.")
+            self.do_next()
+        self.respond("150 Here comes the directory listing.")
         self.current_user.get_bt_list(info['task_id'], info['cid'], on_list)
 
     @authed
@@ -142,7 +152,9 @@ class XunleiFTPConnection(FTPConnection):
             if self.datastream:
                 self.datastream.close()
             self.respond('226 Transfer complete.')
+            self.do_next()
         HTTPProxyClient().fetch(request, on_finished)
+        return "wait"
 
 def run(port=2221, bind="0.0.0.0"):
     from libs.ftpserver import FTPServer
