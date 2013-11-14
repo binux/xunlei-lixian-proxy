@@ -23,7 +23,7 @@ class FTPServer(TCPServer):
                            **kwargs)
 
     def handle_stream(self, stream, address):
-        self.connect_cls(stream, address)
+        self.connect_cls(stream, address, self.io_loop)
 
 class PassiveServer(TCPServer):
     def __init__(self, callback, io_loop=None, ssl_options=None, **kwargs):
@@ -32,8 +32,8 @@ class PassiveServer(TCPServer):
                            **kwargs)
 
     def handle_stream(self, stream, address):
-        access_log.info("new DataStream: %s:%s" % address)
-        self.callback(stream, address, self.io_loop)
+        access_log.debug("new DataStream: %s:%s" % address)
+        self.callback(stream, address)
 
 def authed(func):
     @functools.wraps(func)
@@ -62,6 +62,8 @@ class FTPConnection(object):
         self.passive_server = None
         self.datastream = None
         self.reading = False
+        self._on_datastream_callback = None
+        self.closed = False
 
         self.data_channel = None
 
@@ -87,7 +89,7 @@ class FTPConnection(object):
         return data.decode('utf8', 'replace')
 
     def write(self, data):
-        gen_log.debug(data)
+        gen_log.debug(data.rstrip())
         if not self.stream.closed():
             self.stream.write(data)
         else:
@@ -115,6 +117,9 @@ class FTPConnection(object):
         self.close()
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         access_log.info("%s:%s disconnected." % self.address)
         self.on_close()
         if self.passive_server:
@@ -130,7 +135,8 @@ class FTPConnection(object):
             line = self._decode(line)[:-2]
             gen_log.debug(line)
         except UnicodeDecodeError:
-            return self.respond("501 Can't decode command.")
+            self.respond("501 Can't decode command.")
+            self.wait_cmd()
 
         if line[-4:] in ('ABOR', 'STAT', 'QUIT'):
             cmd = line[-4:]
@@ -138,18 +144,22 @@ class FTPConnection(object):
         else:
             cmd = line.split(' ')[0].upper()
             arg = line[len(cmd)+1:]
+
         try:
             func = getattr(self, "_cmd_%s" % cmd, None)
+            ret = None
             if not func:
                 self.respond('500 Command "%s" not understood.' % cmd)
             else:
-                if func(arg) != "wait" and not self.reading:
-                    self.wait_cmd()
+                ret = func(arg)
         except UnicodeEncodeError:
             self.respond("501 can't decode path")
         except Exception, e:
             self.respond("501 %s" % e)
             gen_log.exception(e)
+        finally:
+            if ret != "wait":
+                self.wait_cmd()
 
     def wait_cmd(self):
         if not self.reading:
@@ -165,6 +175,15 @@ class FTPConnection(object):
             self.respond(200)
         else:
             self.respond(451)
+
+    def _cmd_MODE(self, line):
+        mode = line.upper()
+        if mode == 'S':
+            self.respond('200 Transfer mode set to: S')
+        elif mode in ('B', 'C'):
+            self.respond('504 Unimplemented MODE type.')
+        else:
+            self.respond('501 Unrecognized MODE type.')
 
     def _cmd_USER(self, line):
         self.username = line
@@ -228,6 +247,8 @@ class FTPConnection(object):
         datastream.connect((ip, port), on_connected)
 
     def _new_pasv_socket(self, af=None):
+        if self.datastream:
+            self.datastream.close()
         ip, port = self.stream.socket.getsockname()
         servsock = socket.socket(af or self.stream.socket.family, socket.SOCK_STREAM)
         set_close_exec(servsock.fileno())
@@ -246,7 +267,7 @@ class FTPConnection(object):
             self.passive_server.stop()
             self.passive_server = None
         ip, port = self._new_pasv_socket()
-        self.respond('227 Entering Passive Mode (%s,%u,%u).\r\n' %
+        self.respond('227 Entering Passive Mode (%s,%u,%u).' %
                 (','.join(ip.split('.')), port>>8&0xFF, port&0xFF))
 
     def _cmd_EPSV(self, line):
@@ -267,14 +288,14 @@ class FTPConnection(object):
 
     def _on_datastream(self, stream, address):
         self.datastream = stream
-        self.datastream.set_close_callback(stack_context.wrap(self._on_datastream_close))
+        self.datastream.set_close_callback(functools.partial(self._on_datastream_close, stream))
         if self._on_datastream_callback:
             callback, args, kwargs = self._on_datastream_callback
             self._on_datastream_callback = None
             self.io_loop.add_callback(callback, *args, **kwargs)
 
-    def _on_datastream_close(self):
-        if self.datastream:
+    def _on_datastream_close(self, stream):
+        if self.datastream is stream:
             self.datastream.close()
             self.datastream = None
 
@@ -286,7 +307,9 @@ class FTPConnection(object):
     #def _cmd_RNTO(self, line): pass
     #def _cmd_MKD(self, line): pass
     #def _cmd_MKD(self, line): pass
-    #def _cmd_ABOR(self, line): pass
+    #def _cmd_XMKD(self, line): #return self._cmd_MKD(line)
+    #def _cmd_XPWD(self, line): #return self._cmd_PWD(line)
+    #def _cmd_XRMD(self, line): #return self._cmd_RMD(line)
 
     def _cmd_REST(self, line):
         self.rest = int(line)
@@ -305,6 +328,49 @@ class FTPConnection(object):
             self.datastream.close()
             self.respond('226 Transfer complete.')
         self.datastream.read_until_close(on_complete)
+
+    def _cmd_ABOR(self, line):
+        if self.datastream:
+            self.datastream.close()
+            self.datastream = None
+            self.respond('225 ABOR command successful; data channel closed.')
+        if self._on_datastream_callback:
+            self._on_datastream_callback = None
+
+    def _cmd_REIN(self, line):
+        self.respond("230 Ready for new user.")
+
+    def _cmd_STRU(self, line):
+        stru = line.upper()
+        if stru == 'F':
+            self.respond('200 File transfer structure set to: F.')
+        elif stru in ('P', 'R'):
+            self.respond('504 Unimplemented STRU type.')
+        else:
+            self.respond('501 Unrecognized STRU type.')
+            
+    def _cmd_FEAT(self, line):
+        self.respond("211-Features supported:\r\n")
+        self.respond(" UTF8")
+        self.respond('211 End FEAT.')
+
+    def _cmd_NOOP(self, line):
+        self.respond(200)
+
+    def _cmd_ALLO(self, line):
+        self.respond("202 No storage allocation necessary.")
+
+    def _cmd_HELP(self, line):
+        self.respond("214-The following commands are recognized:")
+        self.respond("ftp server over tornado iostream by binux.")
+        self.respond("214 Help command successful.")
+
+    def _cmd_XCUP(self, line):
+        return self._cmd_CDUP(line)
+
+    def _cmd_XCWD(self, line):
+        return self._cmd_CWD(line)
+
 
 if __name__ == '__main__':
     from tornado.ioloop import IOLoop

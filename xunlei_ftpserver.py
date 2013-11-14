@@ -7,6 +7,7 @@
 
 import os
 import time
+import logging
 import tornado.httpclient
 from libs.xunlei_api import LiXianAPI
 from libs.ftpserver import FTPConnection, authed
@@ -23,6 +24,7 @@ class XunleiFTPConnection(FTPConnection):
             return
         self._xunlei = LiXianAPI()
         def on_login(*args, **kwargs):
+            logging.info("xunlei: login as %s" % username)
             if username+password in xunlei_cache:
                 self.xunlei = xunlei_cache[username+password]
                 self.respond(200)
@@ -37,7 +39,7 @@ class XunleiFTPConnection(FTPConnection):
 
     @property
     def current_user(self):
-        return getattr(self, "xunlei", None)
+        return getattr(self, "xunlei", None) and self.xunlei.logined
 
     @property
     def info_dict(self):
@@ -45,7 +47,7 @@ class XunleiFTPConnection(FTPConnection):
 
     @authed
     def _cmd_LIST(self, line):
-        line = line.split()
+        line = line.split(" ", 1)
         if not line:
             line = ""
         elif len(line) == 1:
@@ -56,49 +58,62 @@ class XunleiFTPConnection(FTPConnection):
         else:
             line = line[-1]
 
-        if line:
+        if line == ".": #fix for ES.
+            self.respond("550 No such dir.")
+            return
+        elif line:
             path = os.path.normpath(os.path.join(self._current_path, line))
         else:
             path = self._current_path
+
         if path == "/":
-            self.list_root(path)
-            return "wait"
+            return self.list_root(path)
         elif path in self.info_dict:
-            self.list_task(path, self.info_dict[path])
-            return "wait"
+            info = self.info_dict[path]
+            if info['task_type'] == 'bt':
+                return self.list_task(path, info)
+            else:
+                data = self._encode(self.format(info))+"\r\n"
+                def on_send(data):
+                    self.respond("150 Here comes the directory listing.")
+                    self.datastream.write(data, on_complete)
+                def on_complete():
+                    self.datastream.close()
+                    self.respond("226 Directory send OK.")
+                self.on_datastream_ready(on_send, data)
         else:
             self.respond("550 No such dir.")
 
-    def list_root(self, path):
+    def format(self, each):
+        return "%sr-xr-xr-x 1 user group %d %s %s" % (
+                    "d" if each['task_type'] == "bt" else "-", each['size'],
+                    time.strftime("%b %d %H:%M", time.strptime(each['dt_committed'], "%Y-%m-%d %H:%M:%S")),
+                    each["taskname"])
+
+    def list_root(self, path, send=True):
         def on_list(data):
-            if not self.datastream:
-                self.respond(500)
-                return
             result = []
             for each in data:
                 if each['status'] != 'complete':
                     continue
                 self.info_dict[os.path.normpath(os.path.join(path, each['taskname']))] = each
-                result.append("%sr-xr-xr-x 1 user group %d %s %s" % (
-                    "d" if each['task_type'] == "bt" else "-", each['size'],
-                    time.strftime("%b %d %H:%M", time.strptime(each['dt_committed'], "%Y-%m-%d %H:%M:%S")),
-                    each["taskname"]))
-            self.datastream.write(self._encode("\r\n".join(result))+"\r\n", on_complete)
+                result.append(self.format(each))
+            if send:
+                self.on_datastream_ready(on_send, self._encode("\r\n".join(result))+"\r\n")
+        def on_send(data):
+            self.datastream.write(data, on_complete)
         def on_complete():
             self.datastream.close()
             self.respond("226 Directory send OK.")
-            self.do_next()
         self.respond("150 Here comes the directory listing.")
-        self.current_user.get_task_list(100, callback=on_list)
+        self.xunlei.get_task_list(10, callback=on_list)
 
-    def list_task(self, path, info):
+    def list_task(self, path, info, send=True):
         def on_list(data):
-            if not self.datastream:
-                self.respond(500)
-                return
             create_time = info['dt_committed']
             result = []
             for each in data:
+                each['dt_committed'] = create_time
                 if each['status'] != 'complete':
                     continue
                 self.info_dict[os.path.normpath(os.path.join(path, each['taskname']))] = each
@@ -106,19 +121,22 @@ class XunleiFTPConnection(FTPConnection):
                     "d" if each['task_type'] == "bt" else "-", each['size'],
                     time.strftime("%b %d %H:%M", time.strptime(create_time, "%Y-%m-%d %H:%M:%S")),
                     each["taskname"]))
-            self.datastream.write(self._encode("\r\n".join(result))+"\r\n", on_complete)
+            if send:
+                self.on_datastream_ready(on_send, self._encode("\r\n".join(result))+"\r\n")
+        def on_send(data):
+            self.datastream.write(data, on_complete)
         def on_complete():
             self.datastream.close()
             self.respond("226 Directory send OK.")
-            self.do_next()
         self.respond("150 Here comes the directory listing.")
-        self.current_user.get_bt_list(info['task_id'], info['cid'], on_list)
+        self.xunlei.get_bt_list(info['task_id'], info['cid'], on_list)
 
     @authed
     def _cmd_SIZE(self, line):
         path = os.path.normpath(os.path.join(self._current_path, line))
         if path not in self.info_dict:
             self.respond("550 No such file.")
+            return
         info = self.info_dict[path]
         self.respond("213 %d" % info['size'])
 
@@ -151,10 +169,13 @@ class XunleiFTPConnection(FTPConnection):
         def on_finished(data):
             if self.datastream:
                 self.datastream.close()
-            self.respond('226 Transfer complete.')
-            self.do_next()
-        HTTPProxyClient().fetch(request, on_finished)
-        return "wait"
+                self.respond('226 Transfer complete.')
+            else:
+                self.respond("426 Transfer aborted.")
+        def on_send():
+            logging.info("xunlei: trans file: %s" % info['taskname'])
+            HTTPProxyClient().fetch(request, on_finished)
+        self.on_datastream_ready(on_send)
 
 def run(port=2221, bind="0.0.0.0"):
     from libs.ftpserver import FTPServer

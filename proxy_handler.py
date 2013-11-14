@@ -84,9 +84,8 @@ class ProxyHandler(tornado.web.RequestHandler):
             self.finish(response.body)
 
     def on_connection_close(self):
-        if hasattr(self, 'forward_request') and hasattr(self.forward_request, 'conn') and hasattr(self.forward_request.conn, 'stream'):
-            self.forward_request.conn.stream.close()
-            assert self.forward_request.conn.stream.socket is None
+        if hasattr(self, 'forward_request') and hasattr(self.forward_request, 'conn'):
+            self.forward_request.conn.close()
 
 def run(port=8886, bind='127.0.0.1'):
     application = tornado.web.Application([
