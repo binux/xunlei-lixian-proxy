@@ -8,8 +8,16 @@
 from tornado.simple_httpclient import SimpleAsyncHTTPClient, _HTTPConnection, native_str, re, HTTPHeaders
 
 class HTTPProxyClient(SimpleAsyncHTTPClient):
+    def __init__(self, *args, **kwargs):
+        super(HTTPProxyClient, self).__init__(*args, **kwargs)
+        self._closed = False
+
+    def close(self):
+        super(HTTPProxyClient, self).close()
+        self._closed = True
+
     def _handle_request(self, request, release_callback, final_callback):
-        request.request.conn = HTTPConnection(self.io_loop, self, request, release_callback,
+        HTTPConnection(self.io_loop, self, request, release_callback,
                        final_callback, self.max_buffer_size, self.resolver)
 
 class HTTPConnection(_HTTPConnection):
@@ -69,10 +77,21 @@ class HTTPConnection(_HTTPConnection):
             self._on_body(b"")
             return
 
-        if getattr(self.request, "on_headers_callback"):
+        if self.request.on_headers_callback:
             self.io_loop.add_callback(self.request.on_headers_callback, self.code, self.headers)
-        if getattr(self.request, "raw_streaming_callback"):
-            self.stream.read_until_close(self._on_body, self.request.raw_streaming_callback)
+        if self.request.raw_streaming_callback:
+            self.stream = patch_iostream(self.stream)
+            chunk_size = 256*1024
+            self.stream.max_buffer_size = 2*1024*1024
+            def raw_streaming_callback(data):
+                self.request.raw_streaming_callback(data, ready_callback)
+                if self.stream.closed():
+                    self._on_body(b"")
+            def ready_callback():
+                if not self.stream.closed():
+                    self.stream._read_to_buffer()
+                    self.stream.read_bytes(chunk_size, raw_streaming_callback)
+            ready_callback()
         else:
             if (self.request.use_gzip and
                     self.headers.get("Content-Encoding") == "gzip"):
@@ -84,3 +103,32 @@ class HTTPConnection(_HTTPConnection):
                 self.stream.read_bytes(content_length, self._on_body)
             else:
                 self.stream.read_until_close(self._on_body)
+
+        
+import socket
+def patch_iostream(iostream):
+    self = iostream
+    def _read_to_buffer():
+        if self._read_buffer_size >= self.max_buffer_size:
+            return 0
+        try:
+            chunk = self.read_from_fd()
+        except (socket.error, IOError, OSError) as e:
+            # ssl.SSLError is a subclass of socket.error
+            if e.args[0] == errno.ECONNRESET:
+                # Treat ECONNRESET as a connection close rather than
+                # an error to minimize log spam  (the exception will
+                # be available on self.error for apps that care).
+                self.close(exc_info=True)
+                return
+            self.close(exc_info=True)
+            raise
+        if chunk is None:
+            return 0
+        self._read_buffer.append(chunk)
+        self._read_buffer_size += len(chunk)
+        if self._read_buffer_size >= self.max_buffer_size:
+            return 0
+        return len(chunk)
+    self._read_to_buffer = _read_to_buffer
+    return iostream

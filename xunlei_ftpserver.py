@@ -106,7 +106,7 @@ class XunleiFTPConnection(FTPConnection):
             self.datastream.close()
             self.respond("226 Directory send OK.")
         self.respond("150 Here comes the directory listing.")
-        self.xunlei.get_task_list(10, callback=on_list)
+        self.xunlei.get_task_list(50, callback=on_list)
 
     def list_task(self, path, info, send=True):
         def on_list(data):
@@ -159,11 +159,11 @@ class XunleiFTPConnection(FTPConnection):
                 self.datastream.close()
             else:
                 self.respond("150 File goes here.")
-        def raw_streaming_callback(data):
-            if self.datastream:
-                self.datastream.write(data)
+        def raw_streaming_callback(data, ready_callback):
+            if self.datastream and not self.datastream.closed():
+                self.datastream.write(data, ready_callback)
             else:
-                request.conn.close()
+                self.http_proxy_client.close()
         request.on_headers_callback = on_header_callback
         request.raw_streaming_callback = raw_streaming_callback
         def on_finished(data):
@@ -174,7 +174,8 @@ class XunleiFTPConnection(FTPConnection):
                 self.respond("426 Transfer aborted.")
         def on_send():
             logging.info("xunlei: trans file: %s" % info['taskname'])
-            HTTPProxyClient().fetch(request, on_finished)
+            self.http_proxy_client = HTTPProxyClient()
+            self.http_proxy_client.fetch(request, on_finished)
         self.on_datastream_ready(on_send)
 
 def run(port=2221, bind="0.0.0.0"):
@@ -184,7 +185,6 @@ def run(port=2221, bind="0.0.0.0"):
     autoreload.start()
     from tornado.log import enable_pretty_logging
     enable_pretty_logging()
-    import logging;logging.getLogger().setLevel(logging.DEBUG)
         
     server = FTPServer(connect_cls=XunleiFTPConnection, debug=True)
     server.listen(port, bind)
@@ -193,4 +193,5 @@ def run(port=2221, bind="0.0.0.0"):
 
 
 if __name__ == "__main__":
+    import logging;logging.getLogger().setLevel(logging.DEBUG)
     run()

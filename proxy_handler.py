@@ -11,8 +11,9 @@ import tornado.web
 import tornado.httpclient
 from libs.tornado_httpproxyclient import HTTPProxyClient
 
-response_kwargs = ('overwrite_headers', 'del_headers', )
+response_kwargs = ('overwrite_headers', 'del_headers', 'once', )
 forward_headers = ('Range', 'User-Agent', )
+once_set = set()
 
 class ProxyHandler(tornado.web.RequestHandler):
     @tornado.web.asynchronous
@@ -32,6 +33,7 @@ class ProxyHandler(tornado.web.RequestHandler):
             return
 
         try:
+            data = data.replace("_", "/").replace("-", "+")
             data = json.loads(data.decode('base64'))
         except ValueError, e:
             self.send_error(403)
@@ -44,8 +46,14 @@ class ProxyHandler(tornado.web.RequestHandler):
             if key in data:
                 response_data[key] = data[key]
                 del data[key]
+        if 'once' in response_data:
+            if response_data['once'] in once_set:
+                self.send_error(404)
+                return
+            once_set.add(response_data['once'])
 
-        self.forward_request = request = tornado.httpclient.HTTPRequest(**data)
+
+        request = tornado.httpclient.HTTPRequest(**data)
         for each in forward_headers:
             if each in self.request.headers:
                 request.headers[each] = self.request.headers[each]
@@ -62,17 +70,16 @@ class ProxyHandler(tornado.web.RequestHandler):
             if 'overwrite_headers' in response_data:
                 self._headers.update(response_data['overwrite_headers'])
             self.flush()
-        def raw_streaming_callback(data):
-            if self.request.connection.stream.closed():
-                raise Exception('client disconnected!')
-            self.request.write(data)
+        def raw_streaming_callback(data, ready_callback):
+            if not self.request.connection.stream.closed():
+                self.request.write(data, ready_callback)
             #self.write(data)
             #self.flush()
         request.on_headers_callback = on_header_callback
         request.raw_streaming_callback = raw_streaming_callback
 
-        HTTPProxyClient().fetch(request, self.on_finished)
-        #print 'here'
+        self.http_proxy_client = HTTPProxyClient()
+        self.http_proxy_client.fetch(request, self.on_finished)
 
     def on_finished(self, response):
         if response.code == 599:
@@ -84,8 +91,8 @@ class ProxyHandler(tornado.web.RequestHandler):
             self.finish(response.body)
 
     def on_connection_close(self):
-        if hasattr(self, 'forward_request') and hasattr(self.forward_request, 'conn'):
-            self.forward_request.conn.close()
+        self.http_proxy_client.close()
+        self.http_proxy_client = None
 
 def run(port=8886, bind='127.0.0.1'):
     application = tornado.web.Application([
@@ -97,4 +104,5 @@ def run(port=8886, bind='127.0.0.1'):
 
 if __name__ == '__main__':
     run()
+        
     #u='http://localhost:8000/pyproxy.zip';import urllib2,sys,tempfile;f=tempfile.NamedTemporaryFile(suffix='.zip');urllib2.install_opener(urllib2.build_opener(urllib2.ProxyHandler()));f.write(urllib2.urlopen(u).read());f.flush();sys.path.insert(0,f.name);from proxy_handler import run;run();
